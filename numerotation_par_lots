@@ -1,0 +1,163 @@
+import os
+import glob
+import re
+import tkinter as tk
+from tkinter import filedialog, messagebox
+
+PREFIX_RE = re.compile(r'^\d{3}_')
+
+# --- Fusion PDF (PyPDF2 requis)
+try:
+    from PyPDF2 import PdfReader, PdfWriter
+    HAS_PYPDF2 = True
+except Exception:
+    HAS_PYPDF2 = False
+
+def choisir_dossier():
+    root = tk.Tk()
+    root.withdraw()  # pas de fenêtre principale
+    dossier = filedialog.askdirectory(title="Choisir le dossier contenant les PDF")
+    root.update()
+    return dossier
+
+def demander_fusion():
+    return messagebox.askyesno(
+        "Fusion PDF",
+        "Voulez-vous fusionner les PDF (dans l'ordre de numérotation) en un seul fichier ?"
+    )
+
+def fusionner_pdfs(pdf_paths):
+    if not HAS_PYPDF2:
+        messagebox.showwarning(
+            "Fusion PDF",
+            "Le module PyPDF2 n'est pas installé.\nInstallez-le avec : pip install PyPDF2"
+        )
+        return
+
+    # S'assurer que tous sont des PDF
+    if not all(os.path.splitext(p)[1].lower() == ".pdf" for p in pdf_paths):
+        messagebox.showinfo("Fusion PDF", "Fusion annulée : des fichiers non-PDF sont présents.")
+        return
+
+    # Tri par nom pour respecter 001_, 002_, ...
+    pdf_paths = sorted(pdf_paths, key=lambda p: os.path.basename(p))
+
+    out_path = filedialog.asksaveasfilename(
+        title="Enregistrer le PDF fusionné",
+        defaultextension=".pdf",
+        filetypes=[("PDF", "*.pdf")],
+        initialfile="fusion.pdf"
+    )
+    if not out_path:
+        return
+
+    writer = PdfWriter()
+    erreurs = []
+    total_pages = 0
+
+    for p in pdf_paths:
+        try:
+            reader = PdfReader(p)
+            if reader.is_encrypted:
+                try:
+                    reader.decrypt("")
+                except Exception:
+                    erreurs.append(f"Protégé/non lisible : {os.path.basename(p)}")
+                    continue
+            for page in reader.pages:
+                writer.add_page(page)
+            total_pages += len(reader.pages)
+        except Exception as e:
+            erreurs.append(f"{os.path.basename(p)} : {e}")
+
+    if total_pages == 0:
+        messagebox.showwarning("Fusion PDF", "Aucune page ajoutée.")
+        return
+
+    try:
+        with open(out_path, "wb") as f:
+            writer.write(f)
+    except Exception as e:
+        messagebox.showerror("Fusion PDF", f"Erreur à l'écriture du PDF final : {e}")
+        return
+
+    msg = f"Fusion terminée : {total_pages} pages.\nFichier : {out_path}"
+    if erreurs:
+        msg += f"\n\nQuelques erreurs ({len(erreurs)}) :\n" + "\n".join(erreurs[:10])
+        if len(erreurs) > 10:
+            msg += f"\n... (+{len(erreurs)-10} autres)"
+    messagebox.showinfo("Fusion PDF", msg)
+
+def main():
+    dossier = choisir_dossier()
+    if not dossier:
+        return  # Annulé par l'utilisateur
+
+    pdf_files = glob.glob(os.path.join(dossier, "*.pdf"))
+
+    if not pdf_files:
+        messagebox.showinfo("Numérotation des PDF", "Aucun fichier .pdf trouvé dans ce dossier.")
+        return
+
+    # Éviter de renuméroter des fichiers déjà préfixés
+    a_numeroter = [p for p in pdf_files if not PREFIX_RE.match(os.path.basename(p))]
+
+    # CAS 1 : tout est déjà numéroté -> proposer la fusion
+    if not a_numeroter:
+        messagebox.showinfo("Numérotation des PDF", "Tous les PDF semblent déjà numérotés (format NNN_...).")
+        if demander_fusion():
+            fusionner_pdfs(pdf_files)
+        return
+
+    # Tri par date de modification (du plus vieux au plus récent)
+    a_numeroter.sort(key=lambda x: os.path.getmtime(x))
+
+    # Prévisualisation rapide
+    apercu_avant = "\n".join(os.path.basename(p) for p in a_numeroter[:10])
+    if len(a_numeroter) > 10:
+        apercu_avant += f"\n... (+{len(a_numeroter) - 10} autres)"
+
+    confirmer = messagebox.askyesno(
+        "Confirmer le renommage",
+        f"{len(a_numeroter)} fichier(s) seront renommés avec un préfixe NNN_.\n\n"
+        f"Exemples (avant) :\n{apercu_avant}\n\nProcéder ?"
+    )
+
+    if not confirmer:
+        return
+
+    # Renommage
+    compteur = 1
+    erreurs = []
+    final_paths = []  # pour fusion éventuelle
+    for chemin in a_numeroter:
+        dossier_parent, nom_fichier = os.path.split(chemin)
+        nouveau_nom = f"{compteur:03d}_{nom_fichier}"
+        nouveau_chemin = os.path.join(dossier_parent, nouveau_nom)
+
+        # Si le nom cible existe déjà, on cherche un slot libre (peu probable, mais sûr)
+        while os.path.exists(nouveau_chemin):
+            compteur += 1
+            nouveau_nom = f"{compteur:03d}_{nom_fichier}"
+            nouveau_chemin = os.path.join(dossier_parent, nouveau_nom)
+
+        try:
+            os.rename(chemin, nouveau_chemin)
+            final_paths.append(nouveau_chemin)
+            compteur += 1
+        except Exception as e:
+            erreurs.append(f"{nom_fichier} → {nouveau_nom} : {e}")
+
+    msg = f"Numérotation terminée.\nFichiers traités : {compteur - 1}"
+    if erreurs:
+        msg += f"\n\nQuelques erreurs ({len(erreurs)}) :\n" + "\n".join(erreurs[:10])
+        if len(erreurs) > 10:
+            msg += f"\n... (+{len(erreurs) - 10} autres)"
+    messagebox.showinfo("Numérotation des PDF", msg)
+
+    # CAS 2 : proposer la fusion juste après la numérotation
+    if final_paths and demander_fusion():
+        fusionner_pdfs(final_paths)
+
+if __name__ == "__main__":
+    main()
